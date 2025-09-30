@@ -20,10 +20,13 @@
 
     const uw = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
-    // Ajuste aqui sua meta por cidade (na ilha da cidade atual)
+    // Meta por cidade (na ilha da cidade atual)
     const TARGET_ALDEIAS = 6;
-    // Ajuste o intervalo de verificação (ms)
+    // Intervalo de verificação (ms)
     const LOOP_MS = 30000;
+
+    // Custos em PC para cada aldeia (1ª até 6ª)
+    const CUSTOS_ALDEIAS = [2, 8, 10, 30, 50, 100];
 
     let loopId = null;
 
@@ -46,6 +49,20 @@
     function getIslandCoordsOfTown(polisID) {
         const t = uw.ITowns.towns[polisID];
         return [t.getIslandCoordinateX(), t.getIslandCoordinateY()];
+    }
+
+    // Lê os pontos de combate disponíveis do DOM:
+    // <div class="nui_battlepoints_container"><div class="bp_icon"></div><div class="points">2</div></div>
+    function getPontosCombateDisponiveis() {
+        try {
+            const el = document.querySelector('.nui_battlepoints_container .points');
+            if (!el) return 0;
+            const raw = (el.textContent || '').trim().replace(/[^\d]/g, '');
+            const val = parseInt(raw, 10);
+            return Number.isFinite(val) ? val : 0;
+        } catch {
+            return 0;
+        }
     }
 
     // Junta models de TODAS as coleções com esse nome (evita depender de [0])
@@ -117,8 +134,7 @@
                 const rel = relPorRural.get(a.id);
                 if (!rel) continue;
 
-                // relation_status:
-                // 0 = bloqueada; !=0 = desbloqueada (normalmente 1)
+                // relation_status: 0 = bloqueada; !=0 = desbloqueada
                 const st = rel?.attributes?.relation_status;
                 if (st === 0) {
                     bloqueadas.push({ aldeia: a, rel });
@@ -126,6 +142,9 @@
                     desbloqueadas++;
                 }
             }
+
+            // Ordena bloqueadas por id para ter determinismo (opcional)
+            bloqueadas.sort((x, y) => (x.aldeia?.id || 0) - (y.aldeia?.id || 0));
 
             log(`ℹ️ Cidade ${polisID} -> ${desbloqueadas} já desbloqueadas / meta ${TARGET_ALDEIAS} | bloqueadas encontradas: ${bloqueadas.length}`);
 
@@ -138,19 +157,43 @@
                 return;
             }
 
-            const faltam = Math.max(0, TARGET_ALDEIAS - desbloqueadas);
-            let feitas = 0;
+            // *** NOVO: verificação de PC disponíveis e custos por ordem ***
+            let pcDisponiveis = getPontosCombateDisponiveis();
+            const faltamParaMeta = Math.max(0, Math.min(TARGET_ALDEIAS, CUSTOS_ALDEIAS.length) - desbloqueadas);
 
-            for (let i = 0; i < bloqueadas.length && feitas < faltam; i++) {
-                const { aldeia, rel } = bloqueadas[i];
-                unlock(polisID, rel.id, aldeia.id);
-                feitas++;
+            if (pcDisponiveis <= 0) {
+                log(`💤 Sem pontos de combate disponíveis no momento (PC=${pcDisponiveis}).`);
+                return;
+            }
+
+            let feitas = 0;
+            let idxCusto = desbloqueadas; // índice da próxima aldeia (0-based)
+            let iBloq = 0;                // cursor na lista de bloqueadas
+
+            while (
+                feitas < faltamParaMeta &&
+                iBloq < bloqueadas.length &&
+                idxCusto < CUSTOS_ALDEIAS.length
+            ) {
+                const custoProx = CUSTOS_ALDEIAS[idxCusto];
+                if (pcDisponiveis >= custoProx) {
+                    const { aldeia, rel } = bloqueadas[iBloq];
+                    unlock(polisID, rel.id, aldeia.id);
+
+                    pcDisponiveis -= custoProx; // consome os PCs localmente
+                    feitas++;
+                    idxCusto++; // próxima aldeia terá o próximo custo
+                    iBloq++;    // pega a próxima bloqueada
+                } else {
+                    log(`⛔ PC insuficientes para próxima aldeia: preciso ${custoProx}, tenho ${pcDisponiveis}.`);
+                    break;
+                }
             }
 
             if (feitas === 0) {
-                log("🔄 Nada para desbloquear agora (ou nenhuma relação pendente para esta ilha).");
+                log("🔄 Nada para desbloquear agora (sem PC ou sem relação pendente/custo atingível).");
             } else {
-                log(`🚀 Tentativas enviadas: ${feitas} (faltavam ${faltam}).`);
+                log(`🚀 Tentativas enviadas: ${feitas}. PC restantes (estimado local): ${pcDisponiveis}.`);
             }
         } catch (e) {
             err('Exceção em runForCurrentTown:', e);
